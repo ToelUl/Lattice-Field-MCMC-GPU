@@ -251,7 +251,7 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
         return -2.0 * interaction.sum(dim=(-2, -1))
 
     def compute_action(self, field: Tensor = None) -> Tensor:
-        """Computes the total action S = \sum_x [ \kappa*K_x + V_x ]."""
+        r"""Computes the total action S = \sum_x [ \kappa*K_x + V_x ]."""
         if field is None:
             kinetic_part = self.compute_kinetic_term()
             potential_part = self.compute_potential_term()
@@ -309,10 +309,15 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
     def compute_time_slice_correlation(self, field: Tensor) -> Tensor:
         """Computes the connected two-point correlation function of time slices.
 
-        This helper function calculates G_c(t) = <S(t)S(0)>_c as defined in
-        Appendix B of the source document (https://arxiv.org/abs/1705.06231).
-        The input field tensor is expected to have the shape
-         [batch_size, n_samples, L, L].
+        This function calculates G_c(t) = <S(t)S(0)>_c as defined in Appendix B
+        of the source document (1705.06231v2). The input field tensor has the shape
+        [batch_size, n_samples, L, L].
+
+        This implementation leverages the Wiener-Khinchin theorem by using FFTs
+        to efficiently compute the autocorrelation. This is mathematically
+        equivalent to averaging the correlation over all possible choices of
+        the reference time slice t=0, which significantly improves statistics
+        by using the full translational invariance of the periodic lattice.
 
         Args:
             field: A tensor of field configurations.
@@ -327,42 +332,56 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
                 f"Input field must have 4 dimensions [B, N_samples, L, L], "
                 f"but got {field.ndim}")
 
-        # S(t) is the spatial average of the field at each time t
-        # The time dimension is the third one (dim=-2)
-        # S has shape [batch_size, n_samples, L]
-        S = field.mean(dim=-1)
+        # S(t) is the spatial average of the field at each time t.
+        # The time dimension is the third one (dim=-2).
+        # S has shape: [batch_size, n_samples, L]
+        S = field.mean(dim=-1).abs()
 
-        # Get the time-slice at t=0 for correlation calculation
-        # S0 has shape [batch_size, n_samples, 1]
-        S0 = S[..., 0].unsqueeze(-1)
+        # 1. Use FFT to compute the autocorrelation.
+        # This is equivalent to averaging over all possible t_0 choices.
+        # S_fft has shape [batch_size, n_samples, L]
+        S_fft = torch.fft.fft(S, dim=-1)
 
-        # Ensemble average of <S(t)S(0)>
-        # Shape: [batch_size, L]
-        G_unconnected = (S * S0).mean(dim=1)
+        # 2. Compute the power spectral density, |F(S)|^2, where F is the FFT.
+        # psd has shape [batch_size, n_samples, L]
+        psd = S_fft.abs().pow(2)
 
-        # Ensemble average of <S(t)> and <S(0)>
-        # avg_S has shape [batch_size, L]
-        avg_S = S.mean(dim=1)
-        # avg_S0 has shape [batch_size, 1]
-        avg_S0 = S0.mean(dim=1)
+        # 3. The inverse FFT of the PSD gives the unconnected correlation.
+        # We take .real as the result must be real-valued.
+        # The division by L is for normalization in the convolution theorem.
+        # G_unconnected_per_sample has shape [batch_size, n_samples, L]
+        G_unconnected_per_sample = torch.fft.ifft(psd, dim=-1).real / self.L
 
-        # The connected correlation function G_c(t) = <S(t)S(0)> - <S(t)><S(0)>
-        G_c = G_unconnected - (avg_S * avg_S0)
+        # 4. Average over the ensemble (n_samples) to get <S(t)S(0)>.
+        # G_unconnected has shape [batch_size, L]
+        G_unconnected = G_unconnected_per_sample.mean(dim=1)
+
+        # 5. Compute the disconnected part, <S>^2.
+        # This requires averaging S over both the time and sample dimensions.
+        # avg_S_scalar has shape [batch_size]
+        avg_S_scalar = S.mean(dim=(-2, -1))
+        disconnected_term = avg_S_scalar.pow(2)
+
+        # 6. Compute the connected correlator: G_c(t) = <S(t)S(0)> - <S>^2.
+        # Unsqueeze the disconnected term for broadcasting over the time dim.
+        G_c = G_unconnected - disconnected_term.unsqueeze(-1)
 
         # --- Symmetrization to reduce noise ---
-        # Due to periodic boundary conditions, G_c(t) should be equal to G_c(L-t).
-        # We use this property to average the correlator, which significantly
-        # reduces statistical errors.
-        # Get G_c(L-t)
+        # Due to periodic boundary conditions, G_c(t) should be equal to
+        # G_c(L-t). We average them to reduce statistical errors.
         G_c_flipped = torch.roll(torch.flip(G_c, dims=[-1]), shifts=1, dims=-1)
-        # G_c_flipped[t=0] is still G_c[t=0], other t are G_c[L-t]
+        # G_c_flipped[t=0] is still G_c[t=0], other t are G_c[L-t].
 
-        # Average G_c(t) and G_c(L-t)
+        # Average G_c(t) and G_c(L-t).
         G_c_sym = 0.5 * (G_c + G_c_flipped)
-        # The t=0 point should not be averaged, so we restore it.
+        # The t=0 point should not be averaged with itself, so restore it.
         G_c_sym[:, 0] = G_c[:, 0]
-        del G_unconnected, avg_S, avg_S0, G_c_flipped, G_c, S, S0
+
+        # Clean up intermediate tensors to free memory
+        del (G_unconnected, G_unconnected_per_sample, S_fft, psd, S,
+             avg_S_scalar, disconnected_term, G_c_flipped, G_c)
         gc.collect()
+
         return G_c_sym
 
     def compute_renormalized_mass(self, field: Tensor) -> Tensor:
