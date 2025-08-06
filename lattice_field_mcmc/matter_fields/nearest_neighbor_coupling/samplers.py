@@ -125,6 +125,7 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
             dtype=torch.float32, device=self.device
         )
 
+    @torch.compile
     def metropolis_update_sub_lattice(self, lattice_color: str) -> None:
         """Performs a Metropolis update for the Phi-4 model.
 
