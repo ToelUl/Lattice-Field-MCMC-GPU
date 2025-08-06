@@ -393,7 +393,6 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
         # 2. Compute the connected susceptibility chi2
         # chi2 has shape [batch_size]
         chi2 = self.L * G_c.sum(dim=-1)
-        # chi2 = self.compute_susceptibility(field)
 
         # 3. Compute the second moment mu2 from G_c(t)
         t = torch.arange(
