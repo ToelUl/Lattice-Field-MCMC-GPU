@@ -228,28 +228,216 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
         self.acceptance_stats.zero_()
         self.acceptance_counter.zero_()
 
-    def _compute_potential_term(self, field: Tensor) -> Tensor:
+    def compute_potential_term(self, field: Tensor = None) -> Tensor:
         """Helper function to compute the potential part of the action."""
+        if field is None:
+            field = self.field
         field_sq = field.pow(2)
         potential = (1 - 2 * self.lambda_) * field_sq + \
                     self.lambda_ * field_sq.pow(2)
         # Sum over the spatial dimensions (L, L).
         return potential.sum(dim=(-2, -1))
 
-    def compute_kinetic_term(self) -> Tensor:
+    def compute_kinetic_term(self, field: Tensor = None) -> Tensor:
         r"""Computes the kinetic term K = -2 \sum_{x,\mu} \phi_x \phi_{x+\mu}."""
+        if field is None:
+            field = self.field
         # To avoid double counting, only sum over forward neighbors (right, down)
-        phi_down = torch.roll(self.field, shifts=1, dims=-2)  # Neighbor in +i
-        phi_right = torch.roll(self.field, shifts=1, dims=-1) # Neighbor in +j
-        interaction = self.field * (phi_down + phi_right)
+        phi_down = torch.roll(field, shifts=1, dims=-2)  # Neighbor in +i
+        phi_right = torch.roll(field, shifts=1, dims=-1) # Neighbor in +j
+        interaction = field * (phi_down + phi_right)
         # Sum over spatial dimensions and multiply by the standard factor.
         return -2.0 * interaction.sum(dim=(-2, -1))
 
-    def compute_action(self) -> Tensor:
+    def compute_action(self, field: Tensor = None) -> Tensor:
         """Computes the total action S = \sum_x [ \kappa*K_x + V_x ]."""
-        kinetic_part = self.compute_kinetic_term()
-        potential_part = self._compute_potential_term(self.field)
+        if field is None:
+            kinetic_part = self.compute_kinetic_term()
+            potential_part = self.compute_potential_term()
+        else:
+            kinetic_part = self.compute_kinetic_term(field)
+            potential_part = self.compute_potential_term(field)
         # Expand kappa to match the shape of the other terms for broadcasting.
-        kappa_exp = self.kappa.view(self.batch_size, 1).expand_as(kinetic_part)
+        kappa_exp = self.kappa.view(self.batch_size, 1).expand_as(kinetic_part).to(kinetic_part.device)
         total_action = kappa_exp * kinetic_part + potential_part
         return total_action
+
+    def compute_average_action(self, field: Tensor = None) -> Tensor:
+        """Computes the average action per site."""
+        if field is None:
+            total_action = self.compute_action()
+        else:
+            total_action = self.compute_action(field)
+        # Average over ensemble and sites.
+        return total_action.mean(dim=1) / (self.L * self.L)
+
+    def compute_magnetization(self, field: Tensor = None) -> Tensor:
+        """Computes the magnetization of the field."""
+        if field is None:
+            field = self.field
+        # Magnetization is the average field value per kappa.
+        return field.mean(dim=(-2, -1))
+
+    def compute_average_magnetization(self, field: Tensor = None) -> Tensor:
+        """Computes the average magnetization per kappa."""
+        if field is None:
+            mag = self.compute_magnetization()
+        else:
+            mag = self.compute_magnetization(field)
+        # Average over ensemble and sites.
+        return mag.abs().mean(dim=1)  # Use absolute value for magnetization
+
+    def compute_susceptibility(self, field: Tensor = None) -> Tensor:
+        """Computes the magnetic susceptibility per kappa."""
+        if field is None:
+            mag = self.compute_magnetization()
+        else:
+            mag = self.compute_magnetization(field)
+        # Susceptibility is the variance of the magnetization per kappa.
+        return (self.L * self.L) * mag.abs().var(dim=1)
+
+    def compute_binder_cumulant(self, field: Tensor = None) -> Tensor:
+        """Computes the Binder cumulant for the magnetization."""
+        if field is None:
+            mag = self.compute_magnetization()
+        else:
+            mag = self.compute_magnetization(field)
+        return 1 - 1/3 * (mag.pow(4).mean(dim=1) /
+                          mag.pow(2).mean(dim=1).pow(2))
+
+    def compute_time_slice_correlation(self, field: Tensor) -> Tensor:
+        """Computes the connected two-point correlation function of time slices.
+
+        This helper function calculates G_c(t) = <S(t)S(0)>_c as defined in
+        Appendix B of the source document (https://arxiv.org/abs/1705.06231).
+        The input field tensor is expected to have the shape
+         [batch_size, n_samples, L, L].
+
+        Args:
+            field: A tensor of field configurations.
+
+        Returns:
+            A tensor of shape [batch_size, L] containing the connected
+            correlation function G_c(t) for each replica.
+        """
+        # Ensure the field has the expected 4 dimensions
+        if field.ndim != 4:
+            raise ValueError(
+                f"Input field must have 4 dimensions [B, N_samples, L, L], "
+                f"but got {field.ndim}")
+
+        # S(t) is the spatial average of the field at each time t
+        # The time dimension is the third one (dim=-2)
+        # S has shape [batch_size, n_samples, L]
+        S = field.mean(dim=-1)
+
+        # Get the time-slice at t=0 for correlation calculation
+        # S0 has shape [batch_size, n_samples, 1]
+        S0 = S[..., 0].unsqueeze(-1)
+
+        # Ensemble average of <S(t)S(0)>
+        # Shape: [batch_size, L]
+        G_unconnected = (S * S0).mean(dim=1)
+
+        # Ensemble average of <S(t)> and <S(0)>
+        # avg_S has shape [batch_size, L]
+        avg_S = S.mean(dim=1)
+        # avg_S0 has shape [batch_size, 1]
+        avg_S0 = S0.mean(dim=1)
+
+        # The connected correlation function G_c(t) = <S(t)S(0)> - <S(t)><S(0)>
+        G_c = G_unconnected - (avg_S * avg_S0)
+
+        # --- Symmetrization to reduce noise ---
+        # Due to periodic boundary conditions, G_c(t) should be equal to G_c(L-t).
+        # We use this property to average the correlator, which significantly
+        # reduces statistical errors.
+        # Get G_c(L-t)
+        G_c_flipped = torch.roll(torch.flip(G_c, dims=[-1]), shifts=1, dims=-1)
+        # G_c_flipped[t=0] is still G_c[t=0], other t are G_c[L-t]
+
+        # Average G_c(t) and G_c(L-t)
+        G_c_sym = 0.5 * (G_c + G_c_flipped)
+        # The t=0 point should not be averaged, so we restore it.
+        G_c_sym[:, 0] = G_c[:, 0]
+        del G_unconnected, avg_S, avg_S0, G_c_flipped, G_c, S, S0
+        gc.collect()
+        return G_c_sym
+
+    def compute_renormalized_mass(self, field: Tensor) -> Tensor:
+        """Computes the renormalized mass from field configurations.
+
+        This calculation is based on the formulas provided in Appendix B of the
+        paper "Cooling Stochastic Quantization with colored noise" (https://arxiv.org/abs/1705.06231)
+        (arXiv:1705.06231v2). It uses the time-slice correlation function G_c(t)
+        to compute the susceptibility (chi2) and the second moment (mu2).
+
+        The formula for d=2 is: m_R^2 = 4 * chi2 / mu2.
+
+        Args:
+            field: A tensor of field configurations with shape
+                   [batch_size, n_samples, L, L].
+
+        Returns:
+            A tensor of shape [batch_size] containing the renormalized mass
+            for each kappa value.
+        """
+        if field is None:
+            raise ValueError(
+                "Field samples must be provided to compute renormalized mass.")
+
+        # 1. Compute the time-slice correlation function G_c(t)
+        # G_c has shape [batch_size, L]
+        G_c = self.compute_time_slice_correlation(field)
+
+        # 2. Compute the connected susceptibility chi2
+        # chi2 has shape [batch_size]
+        chi2 = self.L * G_c.sum(dim=-1)
+        # chi2 = self.compute_susceptibility(field)
+
+        # 3. Compute the second moment mu2 from G_c(t)
+        t = torch.arange(
+            self.L, device=field.device, dtype=field.dtype)
+        t_sq = t.pow(2)
+        # mu2 has shape [batch_size]
+        mu2 = 2 * self.L * (G_c * t_sq).sum(dim=-1)
+
+        # 4. Compute the renormalized mass squared
+        # Based on formula (B15): m_R^2 = 4 * chi2 / mu2
+        # Add a small epsilon to the denominator for numerical stability
+        m_R_sq = 4 * chi2 / mu2
+
+        # Return the square root. Use relu to prevent issues from numerical
+        # noise that might make m_R_sq slightly negative.
+        m_R = torch.sqrt(torch.relu(m_R_sq))
+        del G_c, chi2, mu2, t, t_sq, m_R_sq
+        gc.collect()
+        return m_R
+
+    def compute_rescaled_renormalized_mass(self, field: Tensor = None) -> Tensor:
+        """Computes the rescaled renormalized mass (N * m_R).
+
+        This quantity is the renormalized mass m_R multiplied by the linear
+        lattice size N (L in this code). This scaling is used in the analysis
+        presented in the source document (https://arxiv.org/abs/1705.06231) (e.g., Fig. 12 and Fig. 17).
+
+        Args:
+            field: A tensor of field configurations with shape
+                   [batch_size, n_samples, L, L]. If None, an error will be
+                   raised.
+
+        Returns:
+            A tensor of shape [batch_size] containing the rescaled
+            renormalized mass for each kappa value.
+        """
+        if field is None:
+            raise ValueError(
+                "Field samples must be provided to compute rescaled renormalized mass.")
+
+        # 1. Compute the standard renormalized mass
+        m_R = self.compute_renormalized_mass(field)
+
+        # 2. Rescale by multiplying with the lattice size L (N in the paper)
+        rescaled_m_R = self.L * m_R
+
+        return rescaled_m_R
