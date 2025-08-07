@@ -413,6 +413,7 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
         # 2. Compute the connected susceptibility chi2
         # chi2 has shape [batch_size]
         chi2 = self.L * G_c.sum(dim=-1)
+        chi2_from_m_fluctuation = self.compute_susceptibility(field)
 
         # 3. Compute the second moment mu2 from G_c(t)
         t = torch.arange(
@@ -420,16 +421,19 @@ class ScalarPhi4Model2D(ScalarLatticeSampler2D):
         t_sq = t.pow(2)
         # mu2 has shape [batch_size]
         mu2 = 2 * self.L * (G_c * t_sq).sum(dim=-1)
+        # Because <|S(t)|> is not exactly equal to <|M|>, we need to
+        # rescale mu2 to account for the fluctuation in the magnetization.
+        mu2_fixed = mu2 * (chi2_from_m_fluctuation / chi2)
 
         # 4. Compute the renormalized mass squared
         # Based on formula (B15): m_R^2 = 4 * chi2 / mu2
         # Add a small epsilon to the denominator for numerical stability
-        m_R_sq = 4 * chi2 / mu2
+        m_R_sq = 4 * chi2 / mu2_fixed
 
         # Return the square root. Use relu to prevent issues from numerical
         # noise that might make m_R_sq slightly negative.
         m_R = torch.sqrt(torch.relu(m_R_sq))
-        del G_c, chi2, mu2, t, t_sq, m_R_sq
+        del G_c, chi2, chi2_from_m_fluctuation, mu2, mu2_fixed, t, t_sq, m_R_sq
         gc.collect()
         return m_R
 
