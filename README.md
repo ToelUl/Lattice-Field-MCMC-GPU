@@ -3,9 +3,11 @@ Use GPU-accelerated Markov chain Monte Carlo methods to simulate lattice field t
 
 ## Run Notebooks on Google Colab
 ### Scalar Phi4 
+- Reference: [arXiv:1705.06231](https://arxiv.org/abs/1705.06231)
 - [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ToelUl/Lattice-Field-MCMC-GPU/blob/main/Scalar_2D_Phi4_model.ipynb) **2D Real**
 
 ### Spin Models
+- Reference: [arXiv:1101.3281](https://arxiv.org/abs/1101.3281)
 - [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ToelUl/Lattice-Field-MCMC-GPU/blob/main/2D_Ising_model.ipynb) **2D Ising**
 - [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ToelUl/Lattice-Field-MCMC-GPU/blob/main/2D_Potts_model.ipynb) **2D Potts**
 - [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ToelUl/Lattice-Field-MCMC-GPU/blob/main/2D_XY_model.ipynb) **2D XY**
