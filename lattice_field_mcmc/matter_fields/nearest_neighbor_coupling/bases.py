@@ -503,6 +503,12 @@ class ThermalLatticeSampler2D(nn.Module, ABC):
         print(f"Initialized ThermalLatticeSampler2D on device: {self.device}")
         print(f" L={L}, BatchSize={self.batch_size}, ChainsPerTemp={n_chains}, AMP={use_amp}, PT={pt_enabled}, LargeSim={large_size_simulate}")
 
+        print("Compiling the model...")
+        self.adaptive = False  # Default adaptive flag, can be set by subclasses
+        self.max_delta = 0.0 # Default max delta for proposal width, can be set by subclasses
+        for _ in range(10):
+            self.one_sweep()  # Warm-up to compile the model
+        print("Model compiled successfully.")
 
     @abstractmethod
     def init_spins(self) -> None:
