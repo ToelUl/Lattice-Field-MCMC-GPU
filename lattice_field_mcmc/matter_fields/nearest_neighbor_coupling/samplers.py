@@ -526,7 +526,7 @@ class XYModel2D(ThermalLatticeSampler2D):
         self.ema_alpha = ema_alpha
 
         # Register the maximum angular perturbation as a buffer.
-        self.register_buffer('max_delta', torch.tensor(max_delta, device=device, dtype=torch.float32))
+        self.max_delta = torch.tensor(max_delta, device=device, dtype=torch.float32)
         # Initialize counters for acceptance statistics.
         self.register_buffer('accept_count', torch.tensor(0, dtype=torch.int64, device=self.device))
         self.register_buffer('total_trials', torch.tensor(0, dtype=torch.int64, device=self.device))
